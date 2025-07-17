@@ -4,7 +4,6 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import QSize, Qt
 
-
 class ToolBar(QToolBar):
     def __init__(self, parent):
         super().__init__("Features", parent)
@@ -18,7 +17,7 @@ class ToolBar(QToolBar):
     def update_toolbar(self):
         self.clear()
         self.setStyleSheet("""
-                        QToolBar { 
+            QToolBar { 
                 background-color: #3C3F41;
                 border: none; 
                 padding: 5px; 
@@ -83,7 +82,7 @@ class ToolBar(QToolBar):
             ("Trend View", "📉", "#aed581", "Access Trend View Feature"),
             ("Multiple Trend View", "📊", "#ff8a65", "Access Multiple Trend View Feature"),
             ("Bode Plot", "🔍", "#7986cb", "Access Bode Plot Feature"),
-            ("Polar Plot",  "❄️", "#7986cb", "Access Polar Plot Feature"),       
+            ("Polar Plot", "❄️", "#7986cb", "Access Polar Plot Feature"),       
             ("History Plot", "🕰️", "#ef5350", "Access History Plot Feature"),
             ("Report", "📝", "#ab47bc", "Access Report Feature"),
         ]
@@ -97,20 +96,10 @@ class ToolBar(QToolBar):
         self.addWidget(spacer)
 
     def validate_and_display(self, feature_name):
-        model_based_features = {"Time View", "Time Report"}
-
-        if feature_name in model_based_features:
-            if not self.parent.tree_view.get_selected_model():
-                QMessageBox.warning(self, "Selection Required", "Please select a model from the tree view first.")
-                return
-        else:
-            if not self.parent.tree_view.get_selected_channel():
-                QMessageBox.warning(self, "Selection Required", "Please select a channel from the tree view first.")
-                return
+        # Only require a model selection, as display_feature_content will handle channel-based subwindows
+        if not self.parent.tree_view.get_selected_model():
+            QMessageBox.warning(self, "Selection Required", "Please select a model from the tree view first.")
+            return
 
         # Proceed to display the feature
         self.parent.display_feature_content(feature_name, self.parent.current_project)
-
-
-
-

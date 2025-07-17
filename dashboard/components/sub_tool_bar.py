@@ -1,8 +1,8 @@
 from PyQt5.QtWidgets import (
     QToolBar, QAction, QWidget, QHBoxLayout, QSizePolicy, QLineEdit,
-    QLabel, QDialog, QVBoxLayout, QPushButton, QGridLayout
+    QLabel, QDialog, QVBoxLayout, QPushButton, QGridLayout, QComboBox
 )
-from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtCore import QSize, Qt, QPropertyAnimation
 from PyQt5.QtGui import QIcon
 import logging
 import re
@@ -77,8 +77,8 @@ class SubToolBar(QWidget):
         self.parent = parent
         self.selected_layout = "2x2"  # Default layout
         self.filename_edit = None
+        self.saved_files_combo = None
         self.initUI()
-        # Connect signal with error handling
         try:
             self.parent.mqtt_status_changed.connect(self.update_subtoolbar)
             logging.info("SubToolBar: mqtt_status_changed signal connected successfully")
@@ -96,6 +96,15 @@ class SubToolBar(QWidget):
         self.toolbar.setFixedHeight(100)
         layout.addWidget(self.toolbar)
         self.update_subtoolbar()
+
+    def animate_save_button(self, button):
+        animation = QPropertyAnimation(button, b"styleSheet")
+        animation.setDuration(500)
+        animation.setKeyValueAt(0, "background-color: #43a047; color: white;")
+        animation.setKeyValueAt(0.5, "background-color: #66bb6a; color: white;")
+        animation.setKeyValueAt(1, "background-color: #43a047; color: white;")
+        animation.setLoopCount(3)
+        animation.start()
 
     def update_subtoolbar(self):
         logging.debug(f"SubToolBar: Updating toolbar, MQTT connected: {self.parent.mqtt_connected}")
@@ -139,13 +148,39 @@ class SubToolBar(QWidget):
                 border: 1px solid #b0bec5;
             }
         """)
-        # Enable editing only for Time View
-        is_time_view = self.parent.current_feature == "Time View"
-        self.filename_edit.setReadOnly(not is_time_view)
-        self.filename_edit.setEnabled(True)  # Always enabled to show filename
-        self.refresh_filename()
+        self.filename_edit.setReadOnly(False)
+        self.filename_edit.setEnabled(True)
         self.toolbar.addWidget(self.filename_edit)
+
+        self.saved_files_combo = QComboBox()
+        self.saved_files_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #ffffff;
+                color: #212121;
+                border: 1px solid #90caf9;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 14px;
+                font-weight: 500;
+                min-width: 200px;
+                max-width: 250px;
+            }
+            QComboBox:hover {
+                border: 1px solid #42a5f5;
+                background-color: #f5faff;
+            }
+            QComboBox:focus {
+                border: 1px solid #1e88e5;
+                background-color: #ffffff;
+            }
+        """)
+        self.saved_files_combo.addItem("Select Saved File")
+        self.saved_files_combo.currentTextChanged.connect(self.on_saved_file_selected)
+        self.toolbar.addWidget(self.saved_files_combo)
         self.toolbar.addSeparator()
+
+        self.refresh_filename()
+        self.refresh_saved_files()
 
         def add_action(text_icon, color, callback, tooltip, enabled, background_color):
             action = QAction(text_icon, self)
@@ -176,11 +211,12 @@ class SubToolBar(QWidget):
                         color: #b0bec5;
                     }}
                 """)
+                if text_icon == "▶" and enabled:
+                    button.clicked.connect(lambda: self.animate_save_button(button))
                 logging.debug(f"SubToolBar: Added action '{text_icon}', enabled: {enabled}, background: {background_color}")
 
-        # Enable save/stop actions only for Time View
-        add_action("▶", "#ffffff", self.parent.start_saving, "Start Saving Data (Time View)", is_time_view and not self.parent.is_saving, "#43a047")
-        add_action("⏸", "#ffffff", self.parent.stop_saving, "Stop Saving Data (Time View)", is_time_view and self.parent.is_saving, "#90a4ae")
+        add_action("▶", "#ffffff", self.parent.start_saving, "Start Saving Data", self.parent.mqtt_connected and not self.parent.is_saving, "#43a047")
+        add_action("⏸", "#ffffff", self.parent.stop_saving, "Stop Saving Data", self.parent.is_saving, "#90a4ae")
         self.toolbar.addSeparator()
 
         connect_enabled = not self.parent.mqtt_connected
@@ -225,25 +261,15 @@ class SubToolBar(QWidget):
             return
 
         try:
-            # Default filename
             next_filename = "data1"
             current_filename = None
             filename_counter = 1
-            is_saving = False
+            is_saving = self.parent.is_saving
 
-            # Check if in Time View and current_widget exists
-            if self.parent.current_feature == "Time View" and hasattr(self.parent, 'current_widget'):
-                # Get current_filename and filename_counter from TimeViewFeature
-                current_filename = getattr(self.parent.current_widget, 'current_filename', None)
-                filename_counter = getattr(self.parent.current_widget, 'filename_counter', 1)
-                is_saving = getattr(self.parent.current_widget, 'is_saving', False)
-
-            # Query database for existing filenames
-            model_name = getattr(self.parent.current_widget, 'model_name', None) if hasattr(self.parent, 'current_widget') else None
+            model_name = self.parent.tree_view.get_selected_model() if self.parent.tree_view else None
             filenames = self.parent.db.get_distinct_filenames(self.parent.current_project, model_name) if self.parent.current_project else []
             logging.debug(f"SubToolBar: Retrieved {len(filenames)} filenames from database: {filenames}")
 
-            # Determine the next filename based on existing filenames
             if filenames:
                 numbers = [int(re.match(r"data(\d+)", f).group(1)) for f in filenames if re.match(r"data(\d+)", f)]
                 filename_counter = max(numbers, default=0) + 1 if numbers else 1
@@ -251,8 +277,8 @@ class SubToolBar(QWidget):
             else:
                 next_filename = f"data{filename_counter}"
 
-            # Set the filename in QLineEdit
-            if is_saving and current_filename:
+            if is_saving and hasattr(self.parent, 'current_filename'):
+                current_filename = self.parent.current_filename
                 self.filename_edit.setText(current_filename)
                 logging.debug(f"SubToolBar: Set filename_edit to current_filename: {current_filename}")
             else:
@@ -267,6 +293,38 @@ class SubToolBar(QWidget):
             logging.error(f"SubToolBar: Error refreshing filename: {e}")
             self.filename_edit.setText(f"data{filename_counter}")
             self.filename_edit.repaint()
+
+    def refresh_saved_files(self):
+        """Refresh the saved files combo box with available filenames and frame indices."""
+        try:
+            model_name = self.parent.tree_view.get_selected_model() if self.parent.tree_view else None
+            filenames = self.parent.db.get_distinct_filenames(self.parent.current_project, model_name) if self.parent.current_project else []
+            self.saved_files_combo.clear()
+            self.saved_files_combo.addItem("Select Saved File")
+            if filenames:
+                for filename in filenames:
+                    messages = self.parent.db.get_feature_messages(self.parent.current_project, filename=filename)
+                    frame_indices = sorted(set(msg.get("frameIndex", 0) for msg in messages))
+                    for idx in frame_indices:
+                        self.saved_files_combo.addItem(f"{filename} (Frame {idx})", (filename, idx))
+            logging.debug(f"SubToolBar: Refreshed saved files combo with {len(filenames)} files")
+        except Exception as e:
+            logging.error(f"SubToolBar: Error refreshing saved files: {e}")
+            self.saved_files_combo.clear()
+            self.saved_files_combo.addItem("Select Saved File")
+
+    def on_saved_file_selected(self, text):
+        """Handle selection of a saved file from combo box."""
+        if text == "Select Saved File":
+            return
+        try:
+            index = self.saved_files_combo.currentIndex()
+            filename, frame_idx = self.saved_files_combo.itemData(index) if index > 0 else (text, 0)
+            self.parent.display_feature_content("Time Report", self.parent.current_project, filename=filename, frame_index=frame_idx)
+            logging.info(f"SubToolBar: Opened saved file: {filename}, Frame: {frame_idx}")
+        except Exception as e:
+            logging.error(f"SubToolBar: Error opening saved file {text}: {e}")
+            self.parent.console.append_to_console(f"Error opening saved file {text}: {str(e)}")
 
     def show_layout_menu(self):
         dialog = LayoutSelectionDialog(self, current_layout=self.selected_layout)

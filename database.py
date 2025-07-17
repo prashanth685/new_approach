@@ -13,19 +13,18 @@ class Database:
         self.db = None
         self.projects_collection = None
         self.messages_collection = None
-        self.timeview_collection = None
-        self.projects = []
+        self.feature_collection = None
         self.connect()
 
     def connect(self):
         try:
             self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=5000)
-            self.client.server_info()  # Test connection
+            self.client.server_info()
             self.db = self.client["changed_db"]
             self.projects_collection = self.db["projects"]
             self.messages_collection = self.db["mqttmessage"]
-            self.timeview_collection = self.db["timeview_messages"]
-            self._create_timeview_indexes()
+            self.feature_collection = self.db["feature_messages"]
+            self._create_feature_indexes()
             logging.info(f"Database initialized for {self.email}")
         except Exception as e:
             logging.error(f"Failed to connect to MongoDB: {str(e)}")
@@ -50,15 +49,16 @@ class Database:
             logging.error(f"Failed to reconnect to MongoDB: {str(e)}")
             raise
 
-    def _create_timeview_indexes(self):
+    def _create_feature_indexes(self):
         try:
-            self.timeview_collection.create_index([("topic", ASCENDING)])
-            self.timeview_collection.create_index([("filename", ASCENDING)])
-            self.timeview_collection.create_index([("frameIndex", ASCENDING)])
-            self.timeview_collection.create_index([("topic", ASCENDING), ("filename", ASCENDING)])
-            logging.info("Indexes created for timeview_messages collection")
+            self.feature_collection.create_index([("projectName", ASCENDING)])
+            self.feature_collection.create_index([("moduleName", ASCENDING)])
+            self.feature_collection.create_index([("filename", ASCENDING)])
+            self.feature_collection.create_index([("frameIndex", ASCENDING)])
+            self.feature_collection.create_index([("projectName", ASCENDING), ("moduleName", ASCENDING), ("filename", ASCENDING)])
+            logging.info("Indexes created for feature_messages collection")
         except Exception as e:
-            logging.error(f"Failed to create indexes for timeview_messages: {str(e)}")
+            logging.error(f"Failed to create indexes for feature_messages: {str(e)}")
 
     def close_connection(self):
         if self.client:
@@ -68,7 +68,7 @@ class Database:
                 self.db = None
                 self.projects_collection = None
                 self.messages_collection = None
-                self.timeview_collection = None
+                self.feature_collection = None
                 logging.info("MongoDB connection closed")
             except Exception as e:
                 logging.error(f"Error closing MongoDB connection: {str(e)}")
@@ -156,9 +156,9 @@ class Database:
                 {"project_name": old_project_name, "email": self.email},
                 {"$set": {"project_name": new_project_name}}
             )
-            self.timeview_collection.update_many(
-                {"project_name": old_project_name, "email": self.email},
-                {"$set": {"project_name": new_project_name}}
+            self.feature_collection.update_many(
+                {"projectName": old_project_name, "email": self.email},
+                {"$set": {"projectName": new_project_name}}
             )
             logging.info(f"Project renamed from {old_project_name} to {new_project_name}")
             return True, f"Project renamed to {new_project_name} successfully!"
@@ -171,7 +171,7 @@ class Database:
             result = self.projects_collection.delete_one({"project_name": project_name, "email": self.email})
             logging.info(f"Deleted project {project_name}: {result.deleted_count} documents")
             self.messages_collection.delete_many({"project_name": project_name, "email": self.email})
-            self.timeview_collection.delete_many({"project_name": project_name, "email": self.email})
+            self.feature_collection.delete_many({"projectName": project_name, "email": self.email})
             if project_name in self.projects:
                 self.projects.remove(project_name)
             logging.info(f"Project {project_name} deleted")
@@ -283,8 +283,8 @@ class Database:
                 {"project_name": project_name, "model_name": model_name, "tag_name": current_tag_name, "email": self.email},
                 {"$set": {"tag_name": new_tag_name}}
             )
-            self.timeview_collection.update_many(
-                {"project_name": project_name, "model_name": model_name, "topic": current_tag_name, "email": self.email},
+            self.feature_collection.update_many(
+                {"projectName": project_name, "moduleName": model_name, "topic": current_tag_name, "email": self.email},
                 {"$set": {"topic": new_tag_name}}
             )
             logging.info(f"Tag {current_tag_name} updated to {new_tag_name} in {project_name}/{model_name}")
@@ -313,8 +313,8 @@ class Database:
             self.messages_collection.delete_many(
                 {"project_name": project_name, "model_name": model_name, "tag_name": tag_name, "email": self.email}
             )
-            self.timeview_collection.delete_many(
-                {"project_name": project_name, "model_name": model_name, "topic": tag_name, "email": self.email}
+            self.feature_collection.delete_many(
+                {"projectName": project_name, "moduleName": model_name, "topic": tag_name, "email": self.email}
             )
             logging.info(f"Tag {tag_name} deleted from {project_name}/{model_name}")
             return True, "Tag deleted successfully!"
@@ -391,7 +391,7 @@ class Database:
             logging.error(f"Error saving tag values for {tag_name}: {str(e)}")
             return False, f"Failed to save tag values: {str(e)}"
 
-    def save_timeview_message(self, project_name, model_name, message_data):
+    def save_feature_message(self, project_name, model_name, feature_name, message_data):
         if not self.get_project_data(project_name):
             logging.error(f"Project {project_name} not found!")
             return False, "Project not found!"
@@ -399,7 +399,7 @@ class Database:
         required_fields = ["topic", "filename", "frameIndex", "message"]
         for field in required_fields:
             if field not in message_data or message_data[field] is None:
-                logging.error(f"Missing or invalid required field {field} in timeview message")
+                logging.error(f"Missing or invalid required field {field} in feature message")
                 return False, f"Missing or invalid required field: {field}"
 
         project_data = self.get_project_data(project_name)
@@ -414,57 +414,64 @@ class Database:
         message_data.setdefault("samplingRate", None)
         message_data.setdefault("samplingSize", None)
         message_data.setdefault("messageFrequency", None)
+        message_data.setdefault("tacoChannelCount", 0)
         message_data.setdefault("createdAt", datetime.datetime.now().isoformat())
+        message_data.setdefault("updatedAt", datetime.datetime.now().isoformat())
 
-        message_data["project_name"] = project_name
-        message_data["model_name"] = model_name
+        message_data["projectName"] = project_name
+        message_data["moduleName"] = model_name
+        message_data["featureName"] = feature_name
         message_data["email"] = self.email
         message_data["_id"] = ObjectId()
 
         try:
-            result = self.timeview_collection.insert_one(message_data)
-            logging.info(f"Saved timeview message for {message_data['topic']} in {project_name}/{model_name} with filename {message_data['filename']}: {result.inserted_id}")
-            return True, "Timeview message saved successfully!"
+            result = self.feature_collection.insert_one(message_data)
+            logging.info(f"Saved feature message for {feature_name}/{message_data['topic']} in {project_name}/{model_name} with filename {message_data['filename']}: {result.inserted_id}")
+            return True, "Feature message saved successfully!"
         except Exception as e:
-            logging.error(f"Error saving timeview message: {str(e)}")
-            return False, f"Failed to save timeview message: {str(e)}"
+            logging.error(f"Error saving feature message: {str(e)}")
+            return False, f"Failed to save feature message: {str(e)}"
 
-    def get_timeview_messages(self, project_name, model_name=None, topic=None, filename=None):
+    def get_feature_messages(self, project_name, model_name=None, feature_name=None, topic=None, filename=None):
         if not self.get_project_data(project_name):
             logging.error(f"Project {project_name} not found!")
             return []
 
-        query = {"project_name": project_name, "email": self.email}
+        query = {"projectName": project_name, "email": self.email}
         if model_name:
-            query["model_name"] = model_name
+            query["moduleName"] = model_name
+        if feature_name:
+            query["featureName"] = feature_name
         if topic:
             query["topic"] = topic
         if filename:
             query["filename"] = filename
 
         try:
-            messages = list(self.timeview_collection.find(query).sort("createdAt", 1))
+            messages = list(self.feature_collection.find(query).sort("createdAt", 1))
             if not messages:
-                logging.debug(f"No timeview messages found for project {project_name}")
+                logging.debug(f"No feature messages found for project {project_name}")
                 return []
 
-            logging.debug(f"Retrieved {len(messages)} timeview messages for project {project_name}")
+            logging.debug(f"Retrieved {len(messages)} feature messages for project {project_name}")
             return messages
         except Exception as e:
-            logging.error(f"Error fetching timeview messages: {str(e)}")
+            logging.error(f"Error fetching feature messages: {str(e)}")
             return []
 
-    def get_distinct_filenames(self, project_name, model_name=None):
+    def get_distinct_filenames(self, project_name, model_name=None, feature_name=None):
         if not self.get_project_data(project_name):
             logging.error(f"Project {project_name} not found!")
             return []
 
-        query = {"project_name": project_name, "email": self.email}
+        query = {"projectName": project_name, "email": self.email}
         if model_name:
-            query["model_name"] = model_name
+            query["moduleName"] = model_name
+        if feature_name:
+            query["featureName"] = feature_name
 
         try:
-            filenames = self.timeview_collection.distinct("filename", query)
+            filenames = self.feature_collection.distinct("filename", query)
             sorted_filenames = sorted(filenames, key=lambda x: int(re.match(r"data(\d+)", x).group(1)) if re.match(r"data(\d+)", x) else 0)
             logging.debug(f"Retrieved {len(sorted_filenames)} distinct filenames for project {project_name}")
             return sorted_filenames
