@@ -11,7 +11,6 @@ import logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class QRangeSlider(QWidget):
-    """Custom dual slider widget for selecting a time range."""
     valueChanged = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -24,11 +23,7 @@ class QRangeSlider(QWidget):
         self.right_value = 1000
         self.dragging = None
         self.setMouseTracking(True)
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #d1d6d9;
-            }
-        """)
+        self.setStyleSheet("QWidget { background-color: #d1d6d9; }")
 
     def setRange(self, min_val, max_val):
         self.min_value = min_val
@@ -101,7 +96,6 @@ class QRangeSlider(QWidget):
         return self.left_value, self.right_value
 
 class TimeAxisItem(pg.AxisItem):
-    """Custom axis to display datetime on x-axis."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -109,7 +103,6 @@ class TimeAxisItem(pg.AxisItem):
         return [datetime.fromtimestamp(v).strftime('%Y-%m-%d\n%H:%M:%S') for v in values]
 
 class MouseTracker(QObject):
-    """Event filter to track mouse enter/leave on plot viewport."""
     def __init__(self, parent, idx, feature):
         super().__init__(parent)
         self.idx = idx
@@ -154,12 +147,10 @@ class TimeReportFeature:
         self.init_ui_deferred()
 
     def init_ui_deferred(self):
-        """Initialize UI components immediately and defer data loading."""
         self.setup_basic_ui()
         QTimer.singleShot(0, self.load_data_async)
 
     def setup_basic_ui(self):
-        """Set up the basic UI structure without data loading."""
         layout = QVBoxLayout()
         self.widget.setLayout(layout)
 
@@ -335,7 +326,6 @@ class TimeReportFeature:
         self.ok_button.setEnabled(False)
 
     def load_data_async(self):
-        """Asynchronously load data and initialize plots."""
         try:
             self.init_plots()
             self.refresh_filenames()
@@ -345,7 +335,6 @@ class TimeReportFeature:
                 self.console.append_to_console(f"Error loading Time Report data: {str(e)}")
 
     def init_plots(self):
-        """Initialize plot widgets incrementally."""
         colors = ['r', 'g', 'b', 'y', 'c', 'm']
         for i in range(self.num_plots):
             plot_widget = PlotWidget(axisItems={'bottom': TimeAxisItem(orientation='bottom')}, background='w')
@@ -388,7 +377,6 @@ class TimeReportFeature:
             QApplication.processEvents()
 
     def animate_button_press(self):
-        """Animate button press effect."""
         animation = QPropertyAnimation(self.ok_button, b"styleSheet")
         animation.setDuration(200)
         animation.setStartValue("background-color: #1a73e8;")
@@ -397,9 +385,8 @@ class TimeReportFeature:
         animation.start()
 
     def refresh_filenames(self):
-        """Refresh available filenames from the database."""
         try:
-            self.filenames = self.db.get_distinct_filenames(self.project_name, self.model_name)
+            self.filenames = self.db.get_distinct_filenames(self.project_name, self.model_name, feature_name="Time View")
             self.file_combo.clear()
             if not self.filenames:
                 self.file_combo.addItem("No Files Available")
@@ -435,7 +422,6 @@ class TimeReportFeature:
                 self.console.append_to_console(f"Error refreshing filenames: {str(e)}")
 
     def on_filename_selected(self, filename):
-        """Handle filename selection."""
         self.selected_filename = filename
         self.use_full_range = True
         self.update_time_labels(filename)
@@ -450,7 +436,6 @@ class TimeReportFeature:
             self.end_time = None
 
     def update_time_labels(self, filename):
-        """Update time range labels based on selected file."""
         if not filename or filename in ["No Files Available", "Error Loading Files"]:
             self.start_time_label.setText("File Start Time: N/A")
             self.stop_time_label.setText("File Stop Time: N/A")
@@ -463,9 +448,10 @@ class TimeReportFeature:
             return
 
         try:
-            messages = self.db.get_timeview_messages(
+            messages = self.db.get_feature_messages(
                 self.project_name,
                 model_name=self.model_name,
+                feature_name="Time View",
                 filename=filename
             )
             if not messages:
@@ -530,7 +516,6 @@ class TimeReportFeature:
             self.file_end_time = None
 
     def update_time_from_slider(self):
-        """Update time range based on slider movement."""
         if not self.file_start_time or not self.file_end_time:
             return
 
@@ -565,7 +550,6 @@ class TimeReportFeature:
         self.validate_time_range()
 
     def validate_time_range(self):
-        """Validate the selected time range."""
         start_time = self.start_time_edit.dateTime().toPyDateTime()
         end_time = self.end_time_edit.dateTime().toPyDateTime()
 
@@ -590,7 +574,6 @@ class TimeReportFeature:
                     self.time_slider.blockSignals(False)
 
     def clear_plots(self):
-        """Clear all plots and reset data."""
         for plot in self.plots:
             plot.setData([], [])
         for widget in self.plot_widgets:
@@ -606,7 +589,6 @@ class TimeReportFeature:
         logging.debug("Cleared all plots")
 
     def plot_data(self):
-        """Plot data for the selected file and time range."""
         filename = self.file_combo.currentText()
         if not filename or filename in ["No Files Available", "Error Loading Files"]:
             self.clear_plots()
@@ -615,9 +597,10 @@ class TimeReportFeature:
             return
 
         try:
-            messages = self.db.get_timeview_messages(
+            messages = self.db.get_feature_messages(
                 self.project_name,
                 model_name=self.model_name,
+                feature_name="Time View",
                 filename=filename
             )
             if not messages:
@@ -744,18 +727,15 @@ class TimeReportFeature:
                 self.console.append_to_console(f"Error plotting data: {str(e)}")
 
     def mouse_enter(self, idx):
-        """Handle mouse entering a plot."""
         self.active_line_idx = idx
         self.vlines[idx].setVisible(True)
 
     def mouse_leave(self, idx):
-        """Handle mouse leaving a plot."""
         self.active_line_idx = None
         for vline in self.vlines:
             vline.setVisible(False)
 
     def mouse_moved(self, evt, idx):
-        """Handle mouse movement over a plot."""
         if self.active_line_idx is None:
             return
         pos = evt[0]
@@ -774,5 +754,4 @@ class TimeReportFeature:
             vline.setVisible(True)
 
     def get_widget(self):
-        """Return the main widget."""
         return self.widget

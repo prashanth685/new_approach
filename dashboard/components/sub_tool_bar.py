@@ -1,11 +1,12 @@
 from PyQt5.QtWidgets import (
     QToolBar, QAction, QWidget, QHBoxLayout, QSizePolicy, QLineEdit,
-    QLabel, QDialog, QVBoxLayout, QPushButton, QGridLayout, QComboBox
+    QLabel, QDialog, QVBoxLayout, QPushButton, QGridLayout, QComboBox, QMessageBox
 )
-from PyQt5.QtCore import QSize, Qt, QPropertyAnimation
+from PyQt5.QtCore import QSize, Qt, QTimer
 from PyQt5.QtGui import QIcon
 import logging
 import re
+from datetime import datetime
 
 class LayoutSelectionDialog(QDialog):
     def __init__(self, parent=None, current_layout=None):
@@ -28,11 +29,9 @@ class LayoutSelectionDialog(QDialog):
                 margin-bottom: 10px;
             }
         """)
-
         layout.addWidget(label)
 
         grid = QGridLayout()
-
         layouts = {
             "1x2": "⬛⬛",
             "2x2": "⬛⬛\n⬛⬛",
@@ -45,9 +44,7 @@ class LayoutSelectionDialog(QDialog):
             btn.setFixedSize(80, 80)
             btn.setToolTip(layout_name)
             self.layout_buttons[layout_name] = btn
-
             btn.clicked.connect(lambda _, l=layout_name: self.select_layout(l))
-
             grid.addWidget(btn, row, col)
             col += 1
             if col >= 3:
@@ -56,7 +53,6 @@ class LayoutSelectionDialog(QDialog):
 
         layout.addLayout(grid)
         self.setLayout(layout)
-
         self.update_button_styles()
 
     def update_button_styles(self):
@@ -75,15 +71,24 @@ class SubToolBar(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        self.selected_layout = "2x2"  # Default layout
+        self.selected_layout = "2x2"
         self.filename_edit = None
         self.saved_files_combo = None
+        self.is_saving = False
+        self.start_button = None
+        self.stop_button = None
+        self.blink_timer = None
+        self.blink_state = False
+        self.save_timer = None
+        self.current_feature_instance = None
+        self.current_filename = None
+        self.selected_saved_file = None
         self.initUI()
         try:
             self.parent.mqtt_status_changed.connect(self.update_subtoolbar)
-            logging.info("SubToolBar: mqtt_status_changed signal connected successfully")
+            logging.info("SubToolBar: mqtt_status_changed signal connected")
         except AttributeError as e:
-            logging.error(f"SubToolBar: Failed to connect mqtt_status_changed signal: {e}")
+            logging.error(f"SubToolBar: Failed to connect signal: {e}")
 
     def initUI(self):
         self.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #eceff1, stop:1 #cfd8dc);")
@@ -96,15 +101,6 @@ class SubToolBar(QWidget):
         self.toolbar.setFixedHeight(100)
         layout.addWidget(self.toolbar)
         self.update_subtoolbar()
-
-    def animate_save_button(self, button):
-        animation = QPropertyAnimation(button, b"styleSheet")
-        animation.setDuration(500)
-        animation.setKeyValueAt(0, "background-color: #43a047; color: white;")
-        animation.setKeyValueAt(0.5, "background-color: #66bb6a; color: white;")
-        animation.setKeyValueAt(1, "background-color: #43a047; color: white;")
-        animation.setLoopCount(3)
-        animation.start()
 
     def update_subtoolbar(self):
         logging.debug(f"SubToolBar: Updating toolbar, MQTT connected: {self.parent.mqtt_connected}")
@@ -142,15 +138,57 @@ class SubToolBar(QWidget):
                 border: 1px solid #1e88e5;
                 background-color: #ffffff;
             }
-            QLineEdit[readOnly="true"] {
-                background-color: #e0e0e0;
-                color: #616161;
-                border: 1px solid #b0bec5;
+        """)
+        self.filename_edit.setPlaceholderText("Enter filename (e.g., data1)")
+        self.toolbar.addWidget(self.filename_edit)
+
+        self.start_button = QPushButton("▶")
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #43a047;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 5px;
+                font-size: 24px;
+            }
+            QPushButton:hover {
+                background-color: #66bb6a;
+            }
+            QPushButton:pressed {
+                background-color: #388e3c;
+            }
+            QPushButton:disabled {
+                background-color: #546e7a;
+                color: #b0bec5;
             }
         """)
-        self.filename_edit.setReadOnly(False)
-        self.filename_edit.setEnabled(True)
-        self.toolbar.addWidget(self.filename_edit)
+        self.start_button.clicked.connect(self.start_saving)
+        self.start_button.setEnabled(self.parent.mqtt_connected and not self.is_saving)
+        self.toolbar.addWidget(self.start_button)
+
+        self.stop_button = QPushButton("⏸")
+        self.stop_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ef5350;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 5px;
+                font-size: 24px;
+            }
+            QPushButton:hover {
+                background-color: #f44336;
+            }
+            QPushButton:pressed {
+                background-color: #d32f2f;
+            }
+            QPushButton:disabled {
+                background-color: #546e7a;
+                color: #b0bec5;
+            }
+        """)
+        self.stop_button.clicked.connect(self.stop_saving)
+        self.stop_button.setEnabled(self.is_saving)
+        self.toolbar.addWidget(self.stop_button)
 
         self.saved_files_combo = QComboBox()
         self.saved_files_combo.setStyleSheet("""
@@ -177,10 +215,8 @@ class SubToolBar(QWidget):
         self.saved_files_combo.addItem("Select Saved File")
         self.saved_files_combo.currentTextChanged.connect(self.on_saved_file_selected)
         self.toolbar.addWidget(self.saved_files_combo)
-        self.toolbar.addSeparator()
 
-        self.refresh_filename()
-        self.refresh_saved_files()
+        self.toolbar.addSeparator()
 
         def add_action(text_icon, color, callback, tooltip, enabled, background_color):
             action = QAction(text_icon, self)
@@ -198,7 +234,6 @@ class SubToolBar(QWidget):
                         padding: 8px;
                         border-radius: 5px;
                         background-color: {background_color if enabled else '#546e7a'};
-                        transition: background-color 0.3s ease;
                     }}
                     QToolButton:hover {{
                         background-color: #4a90e2;
@@ -211,13 +246,7 @@ class SubToolBar(QWidget):
                         color: #b0bec5;
                     }}
                 """)
-                if text_icon == "▶" and enabled:
-                    button.clicked.connect(lambda: self.animate_save_button(button))
-                logging.debug(f"SubToolBar: Added action '{text_icon}', enabled: {enabled}, background: {background_color}")
-
-        add_action("▶", "#ffffff", self.parent.start_saving, "Start Saving Data", self.parent.mqtt_connected and not self.parent.is_saving, "#43a047")
-        add_action("⏸", "#ffffff", self.parent.stop_saving, "Stop Saving Data", self.parent.is_saving, "#90a4ae")
-        self.toolbar.addSeparator()
+                logging.debug(f"SubToolBar: Added action '{text_icon}', enabled: {enabled}")
 
         connect_enabled = not self.parent.mqtt_connected
         disconnect_enabled = self.parent.mqtt_connected
@@ -244,7 +273,6 @@ class SubToolBar(QWidget):
                     border: none;
                     padding: 8px;
                     border-radius: 5px;
-                    transition: background-color 0.3s ease;
                 }
                 QToolButton:hover { background-color: #4a90e2; }
                 QToolButton:pressed { background-color: #357abd; }
@@ -252,79 +280,245 @@ class SubToolBar(QWidget):
 
         self.toolbar.repaint()
         self.repaint()
-        logging.debug("SubToolBar: Toolbar updated and repainted")
+        self.refresh_filename()
+        self.refresh_saved_files()
 
-    def refresh_filename(self):
-        """Refresh the QLineEdit with the current or next filename."""
-        if not self.filename_edit:
-            logging.warning("SubToolBar: No filename_edit initialized")
+    def start_saving(self):
+        if not self.parent.mqtt_connected:
+            QMessageBox.warning(self, "Error", "MQTT is not connected!")
+            return
+        if not self.parent.current_project:
+            QMessageBox.warning(self, "Error", "No project selected!")
+            return
+        if not self.parent.current_feature:
+            QMessageBox.warning(self, "Error", "No feature selected!")
+            return
+        selected_model = self.parent.tree_view.get_selected_model()
+        if not selected_model:
+            QMessageBox.warning(self, "Error", "Please select a model!")
+            return
+
+        filename = self.filename_edit.text()
+        if not filename or not re.match(r"data\d+", filename):
+            QMessageBox.warning(self, "Error", "Please enter a valid filename (e.g., data1)!")
             return
 
         try:
-            next_filename = "data1"
-            current_filename = None
-            filename_counter = 1
-            is_saving = self.parent.is_saving
+            feature_name = self.parent.current_feature
+            model_name = selected_model
+            channel = self.parent.tree_view.get_selected_channel() if feature_name not in ["Time View", "Time Report"] else None
 
-            model_name = self.parent.tree_view.get_selected_model() if self.parent.tree_view else None
-            filenames = self.parent.db.get_distinct_filenames(self.parent.current_project, model_name) if self.parent.current_project else []
-            logging.debug(f"SubToolBar: Retrieved {len(filenames)} filenames from database: {filenames}")
+            # Find the current feature instance
+            feature_instance = None
+            for key, instance in self.parent.feature_instances.items():
+                f_name, m_name, c_name, _ = key
+                if f_name == feature_name and m_name == model_name and c_name == channel:
+                    feature_instance = instance
+                    break
 
-            if filenames:
-                numbers = [int(re.match(r"data(\d+)", f).group(1)) for f in filenames if re.match(r"data(\d+)", f)]
-                filename_counter = max(numbers, default=0) + 1 if numbers else 1
-                next_filename = f"data{filename_counter}"
-            else:
-                next_filename = f"data{filename_counter}"
+            if not feature_instance:
+                QMessageBox.warning(self, "Error", "No active feature instance found to save!")
+                return
 
-            if is_saving and hasattr(self.parent, 'current_filename'):
-                current_filename = self.parent.current_filename
-                self.filename_edit.setText(current_filename)
-                logging.debug(f"SubToolBar: Set filename_edit to current_filename: {current_filename}")
-            else:
-                self.filename_edit.setText(next_filename)
-                logging.debug(f"SubToolBar: Set filename_edit to next_filename: {next_filename}")
+            # Store the feature instance and filename for continuous saving
+            self.current_feature_instance = feature_instance
+            self.current_filename = filename
+            self.is_saving = True
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.start_blinking()
 
-            logging.info(f"SubToolBar: Refreshed filename, current: {self.filename_edit.text()}, "
-                         f"saving: {is_saving}, counter: {filename_counter}")
-            self.filename_edit.repaint()
+            # Start periodic saving
+            if not self.save_timer:
+                self.save_timer = QTimer(self)
+                self.save_timer.timeout.connect(self.save_data)
+            self.save_timer.start(1000)  # Save every 1 second
 
+            self.parent.console.append_to_console(f"Started saving data to {filename} for {feature_name}")
         except Exception as e:
-            logging.error(f"SubToolBar: Error refreshing filename: {e}")
-            self.filename_edit.setText(f"data{filename_counter}")
-            self.filename_edit.repaint()
+            logging.error(f"SubToolBar: Error starting saving: {e}")
+            self.parent.console.append_to_console(f"Error starting saving: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Error starting saving: {str(e)}")
 
-    def refresh_saved_files(self):
-        """Refresh the saved files combo box with available filenames and frame indices."""
+    def stop_saving(self):
+        try:
+            if self.is_saving:
+                self.is_saving = False
+                self.start_button.setEnabled(self.parent.mqtt_connected)
+                self.stop_button.setEnabled(False)
+                self.stop_blinking()
+                if self.save_timer:
+                    self.save_timer.stop()
+                self.parent.console.append_to_console(f"Stopped saving data for {self.parent.current_feature}")
+                self.current_feature_instance = None
+                self.current_filename = None
+                self.refresh_saved_files()
+                self.refresh_filename()
+        except Exception as e:
+            logging.error(f"SubToolBar: Error stopping saving: {e}")
+            self.parent.console.append_to_console(f"Error stopping saving: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Error stopping saving: {str(e)}")
+
+    def start_blinking(self):
+        if not self.blink_timer:
+            self.blink_timer = QTimer(self)
+            self.blink_timer.timeout.connect(self.toggle_blink)
+        self.blink_timer.start(500)  # Blink every 500ms
+        self.blink_state = True
+        self.toggle_blink()
+
+    def stop_blinking(self):
+        if self.blink_timer:
+            self.blink_timer.stop()
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #43a047;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 5px;
+                font-size: 24px;
+            }
+            QPushButton:hover {
+                background-color: #66bb6a;
+            }
+            QPushButton:pressed {
+                background-color: #388e3c;
+            }
+            QPushButton:disabled {
+                background-color: #546e7a;
+                color: #b0bec5;
+            }
+        """)
+
+    def toggle_blink(self):
+        self.blink_state = not self.blink_state
+        color = "#ff0000" if self.blink_state else "#43a047"
+        self.start_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {color};
+                color: white;
+                padding: 5px 10px;
+                border-radius: 5px;
+                font-size: 24px;
+            }}
+            QPushButton:disabled {{
+                background-color: #546e7a;
+                color: #b0bec5;
+            }}
+        """)
+
+    def save_data(self):
+        if not self.is_saving or not self.current_feature_instance:
+            return
+
+        try:
+            feature_name = self.parent.current_feature
+            model_name = self.parent.tree_view.get_selected_model()
+            filename = self.current_filename
+
+            # Collect data from the feature instance
+            data = self.collect_feature_data(self.current_feature_instance, feature_name)
+            if not data:
+                self.parent.console.append_to_console(f"No data available to save for {feature_name}")
+                return
+
+            # Save data to the database
+            message_data = {
+                "topic": "dashboard_data",
+                "filename": filename,
+                "frameIndex": 0,
+                "message": data,
+                "numberOfChannels": len(data.get("channel_data", [])) if feature_name in ["Time View", "Time Report"] else 1,
+                "samplingRate": getattr(self.current_feature_instance, 'sample_rate', 4096),
+                "samplingSize": len(data.get("channel_data", [[]])[0]) if feature_name in ["Time View", "Time Report"] else len(data.get("data", [])),
+                "messageFrequency": None,
+                "tacoChannelCount": data.get("tacho_channels_count", 0) if feature_name in ["Time View", "Time Report"] else 0,
+                "createdAt": datetime.now().isoformat()
+            }
+
+            success, msg = self.parent.db.save_feature_message(self.parent.current_project, model_name, feature_name, message_data)
+            if success:
+                self.parent.console.append_to_console(f"Saved data to {filename} for {feature_name}")
+            else:
+                self.parent.console.append_to_console(f"Failed to save data: {msg}")
+        except Exception as e:
+            logging.error(f"SubToolBar: Error saving data: {e}")
+            self.parent.console.append_to_console(f"Error saving data: {str(e)}")
+
+    def collect_feature_data(self, feature_instance, feature_name):
+        try:
+            if feature_name in ["Time View", "Time Report"]:
+                data = {
+                    "channel_data": [list(data) for data in feature_instance.fifo_data[:feature_instance.main_channels]],
+                    "tacho_freq": list(feature_instance.fifo_data[feature_instance.main_channels]) if feature_instance.tacho_channels_count >= 1 else [],
+                    "tacho_trigger": list(feature_instance.fifo_data[feature_instance.main_channels + 1]) if feature_instance.tacho_channels_count >= 2 else [],
+                    "tacho_channels_count": feature_instance.tacho_channels_count
+                }
+                return data
+            # Placeholder for other features
+            elif feature_name in [
+                "Tabular View", "FFT", "Waterfall", "Centerline", "Orbit",
+                "Trend View", "Multiple Trend View", "Bode Plot", "History Plot",
+                "Polar Plot", "Report"
+            ]:
+                return {}  # Implement specific data collection for these features
+            else:
+                logging.warning(f"SubToolBar: Unknown feature {feature_name} in collect_feature_data")
+                return {}
+        except Exception as e:
+            logging.error(f"SubToolBar: Error collecting data for {feature_name}: {e}")
+            return {}
+
+    def refresh_filename(self):
+        if not self.filename_edit:
+            logging.warning("SubToolBar: No filename_edit initialized")
+            return
         try:
             model_name = self.parent.tree_view.get_selected_model() if self.parent.tree_view else None
             filenames = self.parent.db.get_distinct_filenames(self.parent.current_project, model_name) if self.parent.current_project else []
+            filename_counter = 1
+            if filenames:
+                numbers = [int(re.match(r"data(\d+)", f).group(1)) for f in filenames if re.match(r"data(\d+)", f)]
+                filename_counter = max(numbers, default=0) + 1 if numbers else 1
+            next_filename = f"data{filename_counter}"
+            self.filename_edit.setText(next_filename)
+            self.filename_edit.repaint()
+        except Exception as e:
+            logging.error(f"SubToolBar: Error refreshing filename: {e}")
+            self.filename_edit.setText("data1")
+
+    def refresh_saved_files(self):
+        try:
+            model_name = self.parent.tree_view.get_selected_model() if self.parent.tree_view else None
+            feature_name = self.parent.current_feature
+            filenames = self.parent.db.get_distinct_filenames(self.parent.current_project, model_name, feature_name) if self.parent.current_project and feature_name else []
             self.saved_files_combo.clear()
             self.saved_files_combo.addItem("Select Saved File")
             if filenames:
                 for filename in filenames:
-                    messages = self.parent.db.get_feature_messages(self.parent.current_project, filename=filename)
-                    frame_indices = sorted(set(msg.get("frameIndex", 0) for msg in messages))
-                    for idx in frame_indices:
-                        self.saved_files_combo.addItem(f"{filename} (Frame {idx})", (filename, idx))
-            logging.debug(f"SubToolBar: Refreshed saved files combo with {len(filenames)} files")
+                    self.saved_files_combo.addItem(filename)
+            logging.debug(f"SubToolBar: Refreshed saved files with {len(filenames)} files for feature {feature_name}")
         except Exception as e:
             logging.error(f"SubToolBar: Error refreshing saved files: {e}")
             self.saved_files_combo.clear()
             self.saved_files_combo.addItem("Select Saved File")
 
     def on_saved_file_selected(self, text):
-        """Handle selection of a saved file from combo box."""
-        if text == "Select Saved File":
-            return
         try:
-            index = self.saved_files_combo.currentIndex()
-            filename, frame_idx = self.saved_files_combo.itemData(index) if index > 0 else (text, 0)
-            self.parent.display_feature_content("Time Report", self.parent.current_project, filename=filename, frame_index=frame_idx)
-            logging.info(f"SubToolBar: Opened saved file: {filename}, Frame: {frame_idx}")
+            if text == "Select Saved File":
+                self.selected_saved_file = None
+                logging.debug("SubToolBar: Cleared selected saved file")
+                return
+            self.selected_saved_file = text
+            logging.info(f"SubToolBar: Selected saved file: {text}")
+            # Trigger display of the current feature with the selected saved file
+            if self.parent.current_feature and self.parent.current_project:
+                self.parent.display_feature_content(self.parent.current_feature, self.parent.current_project, filename=text)
+                self.parent.console.append_to_console(f"Loaded saved file: {text} for feature: {self.parent.current_feature}")
         except Exception as e:
-            logging.error(f"SubToolBar: Error opening saved file {text}: {e}")
-            self.parent.console.append_to_console(f"Error opening saved file {text}: {str(e)}")
+            logging.error(f"SubToolBar: Error handling saved file selection {text}: {e}")
+            self.parent.console.append_to_console(f"Error loading saved file {text}: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Error loading saved file {text}: {str(e)}")
 
     def show_layout_menu(self):
         dialog = LayoutSelectionDialog(self, current_layout=self.selected_layout)

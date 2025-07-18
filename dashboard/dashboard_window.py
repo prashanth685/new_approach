@@ -29,6 +29,7 @@ from features.report import ReportFeature
 from select_project import SelectProjectWidget
 from create_project import CreateProjectWidget
 from project_structure import ProjectStructureWidget
+import threading
 
 class DashboardWindow(QWidget):
     mqtt_status_changed = pyqtSignal(bool)
@@ -46,13 +47,10 @@ class DashboardWindow(QWidget):
         self.sub_windows = {}
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
-        self.is_saving = False
-        self.current_filename = None
         self.mqtt_connected = False
         self.select_project_widget = None
         self.create_project_widget = None
         self.project_structure_widget = None
-        self.saving_features = {}  # Track saving state for each feature/model/channel
         self.initUI()
         QTimer.singleShot(0, self.deferred_initialization)
 
@@ -312,58 +310,31 @@ class DashboardWindow(QWidget):
             self.mqtt_status.update_mqtt_status_indicator()
             logging.info(f"MQTT disconnected for project: {self.current_project}")
             self.console.append_to_console(f"MQTT disconnected for project: {self.current_project}")
-            if self.is_saving:
-                self.stop_saving()
         except Exception as e:
             logging.error(f"Failed to disconnect MQTT: {str(e)}")
             self.console.append_to_console(f"Failed to disconnect MQTT: {str(e)}")
             self.mqtt_status.update_mqtt_status_indicator()
 
-    def on_data_received(self, tag_name, model_name, values, sample_rate):
-        # Update active feature widgets
-        for (feature_name, instance_model, instance_channel, _), feature_instance in self.feature_instances.items():
-            if instance_model == model_name and hasattr(feature_instance, 'on_data_received'):
-                try:
-                    feature_instance.on_data_received(tag_name, model_name, values, sample_rate)
-                except Exception as e:
-                    logging.error(f"Error in on_data_received for {feature_name}: {str(e)}")
+    def on_data_received(self, feature_name, tag_name, model_name, values, sample_rate):
+        try:
+            # Update only the relevant feature instances
+            for key, feature_instance in self.feature_instances.items():
+                instance_feature, instance_model, instance_channel, _ = key
+                if instance_feature == feature_name and instance_model == model_name and hasattr(feature_instance, 'on_data_received'):
+                    QTimer.singleShot(0, lambda: self._update_feature(
+                        instance_feature, instance_model, instance_channel, 
+                        feature_instance, tag_name, values, sample_rate
+                    ))
+        except Exception as e:
+            logging.error(f"Error in on_data_received for {feature_name}: {str(e)}")
+            self.console.append_to_console(f"Error processing data for {feature_name}: {str(e)}")
 
-        # Save data if saving is enabled for the feature
-        if self.is_saving:
-            project_data = self.db.get_project_data(self.current_project)
-            if not project_data:
-                logging.error(f"Project {self.current_project} not found!")
-                return
-
-            model = next((m for m in project_data["models"] if m["name"] == model_name), None)
-            if not model:
-                logging.error(f"Model {model_name} not found in project {self.current_project}!")
-                return
-
-            channels = [ch["channelName"] for ch in model.get("channels", [])]
-            for feature_name in self.saving_features:
-                for channel in channels if feature_name not in ["Time View", "Time Report"] else [None]:
-                    key = (feature_name, model_name, channel)
-                    if key in self.saving_features:
-                        filename = self.saving_features[key]
-                        message_data = {
-                            "topic": tag_name,
-                            "filename": filename,
-                            "frameIndex": 0,  # Increment as needed
-                            "message": values,
-                            "numberOfChannels": len(channels) if channels else 1,
-                            "samplingRate": sample_rate,
-                            "samplingSize edif": len(values),
-                            "messageFrequency": None,
-                            "tacoChannelCount": 0,
-                            "createdAt": datetime.now().isoformat(),
-                            "updatedAt": datetime.now().isoformat()
-                        }
-                        success, msg = self.db.save_feature_message(self.current_project, model_name, feature_name, message_data)
-                        if success:
-                            logging.info(f"Saved data for {feature_name}/{model_name}/{channel or 'No Channel'} to {filename}")
-                        else:
-                            logging.error(f"Failed to save data for {feature_name}/{model_name}/{channel or 'No Channel'}: {msg}")
+    def _update_feature(self, feature_name, model_name, channel, feature_instance, tag_name, values, sample_rate):
+        try:
+            feature_instance.on_data_received(tag_name, model_name, values, sample_rate)
+            logging.debug(f"Updated feature {feature_name}/{model_name}/{channel or 'No Channel'}")
+        except Exception as e:
+            logging.error(f"Error updating feature {feature_name}/{model_name}/{channel or 'No Channel'}: {str(e)}")
 
     def on_mqtt_status(self, message):
         self.mqtt_connected = "Connected" in message
@@ -459,96 +430,6 @@ class DashboardWindow(QWidget):
                 logging.error(f"Error deleting project: {str(e)}")
                 QMessageBox.warning(self, "Error", f"Error deleting project: {str(e)}")
 
-    def start_saving(self):
-        if not self.mqtt_connected:
-            QMessageBox.warning(self, "Error", "MQTT is not connected! Please connect to MQTT first.")
-            return
-        if not self.current_project:
-            QMessageBox.warning(self, "Error", "No project selected to save data!")
-            return
-        selected_model = self.tree_view.get_selected_model()
-        if not selected_model:
-            QMessageBox.warning(self, "Error", "Please select a model to save data!")
-            return
-
-        try:
-            project_data = self.db.get_project_data(self.current_project)
-            if not project_data:
-                QMessageBox.warning(self, "Error", "Project data not found!")
-                return
-
-            self.current_filename = self.sub_tool_bar.filename_edit.text()
-            model = next((m for m in project_data["models"] if m["name"] == selected_model), None)
-            if not model:
-                QMessageBox.warning(self, "Error", f"Model {selected_model} not found!")
-                return
-
-            channels = [ch["channelName"] for ch in model.get("channels", [])]
-            feature_classes = {
-                "Tabular View": TabularViewFeature,
-                "Time View": TimeViewFeature,
-                "Time Report": TimeReportFeature,
-                "FFT": FFTViewFeature,
-                "Waterfall": WaterfallFeature,
-                "Centerline": CenterLineFeature,
-                "Orbit": OrbitFeature,
-                "Trend View": TrendViewFeature,
-                "Multiple Trend View": MultiTrendFeature,
-                "Bode Plot": BodePlotFeature,
-                "History Plot": HistoryPlotFeature,
-                "Polar Plot": PolarPlotFeature,
-                "Report": ReportFeature
-            }
-
-            for feature_name in feature_classes:
-                for channel in channels if feature_name not in ["Time View", "Time Report"] else [None]:
-                    key = (feature_name, selected_model, channel)
-                    self.saving_features[key] = self.current_filename
-                    # Initialize saving for open feature instances
-                    if key in self.feature_instances:
-                        feature_instance = self.feature_instances[key]
-                        if hasattr(feature_instance, 'start_saving'):
-                            try:
-                                feature_instance.start_saving(filename=self.current_filename)
-                                logging.info(f"Started saving for active widget {feature_name}/{selected_model}/{channel or 'No Channel'}")
-                            except Exception as e:
-                                logging.error(f"Failed to start saving for {feature_name}/{selected_model}/{channel or 'No Channel'}: {str(e)}")
-
-            self.is_saving = True
-            self.sub_tool_bar.update_subtoolbar()
-            logging.info(f"Started saving data for all features with filename {self.current_filename}")
-            self.file_bar.update_file_bar()
-        except Exception as e:
-            logging.error(f"Failed to start saving: {str(e)}")
-            QMessageBox.warning(self, "Error", f"Failed to start saving: {str(e)}")
-
-    def stop_saving(self):
-        if not self.is_saving:
-            QMessageBox.warning(self, "Error", "No saving in progress!")
-            return
-
-        try:
-            for key in list(self.saving_features.keys()):
-                feature_name, model_name, channel = key
-                if key in self.feature_instances:
-                    feature_instance = self.feature_instances[key]
-                    if hasattr(feature_instance, 'stop_saving'):
-                        try:
-                            feature_instance.stop_saving()
-                            logging.info(f"Stopped saving for active widget {feature_name}/{model_name}/{channel or 'No Channel'}")
-                        except Exception as e:
-                            logging.error(f"Failed to stop saving for {feature_name}/{model_name}/{channel or 'No Channel'}: {str(e)}")
-                del self.saving_features[key]
-
-            self.is_saving = False
-            self.current_filename = None
-            self.sub_tool_bar.update_subtoolbar()
-            logging.info("Stopped saving data for all features")
-            self.file_bar.update_file_bar()
-        except Exception as e:
-            logging.error(f"Failed to stop saving: {str(e)}")
-            QMessageBox.warning(self, "Error", f"Failed to stop saving: {str(e)}")
-
     def display_feature_content(self, feature_name, project_name):
         try:
             logging.debug(f"Attempting to display feature: {feature_name} for project: {project_name}")
@@ -565,7 +446,6 @@ class DashboardWindow(QWidget):
                 logging.warning(f"No model selected for {feature_name}")
                 return
 
-            # Retrieve channels from the database
             project_data = self.db.get_project_data(project_name)
             if not project_data:
                 self.console.append_to_console(f"Project {project_name} not found in database.")
@@ -578,7 +458,6 @@ class DashboardWindow(QWidget):
                 logging.error(f"Model {selected_model} not found in project {project_name}!")
                 return
 
-            # Get the selected channel from TreeView, or None for features that don't require a channel
             selected_channel = self.tree_view.get_selected_channel() if feature_name not in ["Time View", "Time Report"] else None
             channels = [selected_channel] if selected_channel and feature_name not in ["Time View", "Time Report"] else [None]
 
@@ -608,11 +487,9 @@ class DashboardWindow(QWidget):
                 QMessageBox.warning(self, "Error", f"Unknown feature: {feature_name}")
                 return
 
-            # Create a subwindow for the selected channel
             for channel in channels:
-                # Generate a unique key for each subwindow instance to allow duplicates
                 import time
-                unique_id = int(time.time() * 1000)  # Milliseconds as a unique identifier
+                unique_id = int(time.time() * 1000)
                 key = (feature_name, selected_model, channel, unique_id)
 
                 try:
@@ -636,11 +513,6 @@ class DashboardWindow(QWidget):
                             sub_window.closeEvent = lambda event, k=key: self.on_subwindow_closed(event, k)
                             sub_window.show()
                             logging.debug(f"Created new subwindow for {key}, ID: {id(sub_window)}")
-                            # Start saving for this feature if globally saving
-                            if self.is_saving and (feature_name, selected_model, channel) in self.saving_features:
-                                if hasattr(feature_instance, 'start_saving'):
-                                    feature_instance.start_saving(filename=self.current_filename)
-                                    logging.info(f"Started saving for newly opened widget {key}")
                         else:
                             logging.error(f"Failed to create subwindow for {feature_name}/{selected_model}/{channel or 'No Channel'}")
                             QMessageBox.warning(self, "Error", f"Failed to create subwindow for {feature_name}")
