@@ -10,16 +10,13 @@ import logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class TimeAxisItem(AxisItem):
-    """Custom axis to display datetime on x-axis."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def tickStrings(self, values, scale, spacing):
-        """Convert timestamps to 'YYYY-MM-DD\nHH:MM:SS' format."""
         return [datetime.fromtimestamp(v).strftime('%Y-%m-%d\n%H:%M:%S') for v in values]
 
 class MouseTracker(QObject):
-    """Event filter to track mouse enter/leave on plot viewport."""
     def __init__(self, parent, idx, feature):
         super().__init__(parent)
         self.idx = idx
